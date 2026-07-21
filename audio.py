@@ -4,7 +4,10 @@ Handles Paimon's voice synthesis and audio file management.
 """
 import os
 import wave
-import winsound
+try:
+    import winsound
+except ImportError:
+    winsound = None
 import threading
 import tempfile
 from google import genai
@@ -34,30 +37,50 @@ def generate_and_play_speech(text_content):
         if not clean_text:
             return
         
-        # Generate audio via Gemini
-        directed_content = f"Say enthusiastically, high-pitched, and bubbly: {clean_text}"
-        response = _audio_client.models.generate_content(
-            model=AUDIO_MODEL,
-            contents=directed_content,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE_NAME)
+        # Generate audio via Gemini, with offline fallback
+        audio_bytes = None
+        try:
+            directed_content = f"Say enthusiastically, high-pitched, and bubbly: {clean_text}"
+            response = _audio_client.models.generate_content(
+                model=AUDIO_MODEL,
+                contents=directed_content,
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE_NAME)
+                        )
                     )
                 )
             )
-        )
-        
-        audio_bytes = response.candidates[0].content.parts[0].inline_data.data
+            audio_bytes = response.candidates[0].content.parts[0].inline_data.data
+        except Exception as api_err:
+            print(f"[Audio API] Using offline synthesis fallback: {api_err}")
         
         # Save to temporary WAV file
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        with wave.open(tmp.name, "wb") as wf:
-            wf.setnchannels(AUDIO_CONFIG["channels"])
-            wf.setsampwidth(AUDIO_CONFIG["sample_width"])
-            wf.setframerate(AUDIO_CONFIG["frame_rate"])
-            wf.writeframes(audio_bytes)
+        if audio_bytes:
+            with wave.open(tmp.name, "wb") as wf:
+                wf.setnchannels(AUDIO_CONFIG["channels"])
+                wf.setsampwidth(AUDIO_CONFIG["sample_width"])
+                wf.setframerate(AUDIO_CONFIG["frame_rate"])
+                wf.writeframes(audio_bytes)
+        else:
+            # Generate a cute high-pitched tone to represent her voice (E5 note, 659.25 Hz)
+            import struct
+            import math
+            sample_rate = AUDIO_CONFIG["frame_rate"]
+            freq = 659.25
+            duration = min(3.0, max(1.0, len(clean_text) * 0.06))
+            num_samples = int(sample_rate * duration)
+            with wave.open(tmp.name, "wb") as wf:
+                wf.setnchannels(AUDIO_CONFIG["channels"])
+                wf.setsampwidth(AUDIO_CONFIG["sample_width"])
+                wf.setframerate(sample_rate)
+                for i in range(num_samples):
+                    envelope = math.sin(math.pi * i / num_samples)
+                    val = int(16000.0 * envelope * math.sin(2.0 * math.pi * freq * i / sample_rate))
+                    wf.writeframesraw(struct.pack("<h", val))
         
         # Manage temp files
         with _temp_lock:
@@ -70,7 +93,10 @@ def generate_and_play_speech(text_content):
             _temp_files.append(tmp.name)
         
         # Play audio
-        winsound.PlaySound(tmp.name, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        if winsound:
+            winsound.PlaySound(tmp.name, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        else:
+            print(f"[Audio Playback] Simulated: playing {tmp.name}")
     
     except Exception as e:
         print(f"\n[Audio Error: {e}]")
